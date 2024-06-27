@@ -1,4 +1,7 @@
 import ctypes
+
+import pytest
+
 import windows
 import windows.generated_def as gdef
 import windows.remotectypes as rctypes
@@ -24,8 +27,9 @@ def test_remote_struct_same_bitness():
     assert struct.szCSDVersion == remstruct.szCSDVersion
     assert struct.wProductType == remstruct.wProductType
 
-# This test fails for now.
+# This test fails for now. (0.6)
 # Should I improve remote ctypes to handel this ?
+@pytest.mark.known_to_fail
 def test_remote_long_ptr():
     # Bug thatwas in retrieving of NtCreateFile arguments
     target = windows.current_process

@@ -230,6 +230,12 @@ def test_assembler():
     CheckInstr(x86.Test, immediat_accepted=-1)('EAX', 0xffffffff)
     CheckInstr(x86.Test)('ECX', 0x42)
 
+    CheckInstr(Jmp)('EAX')
+    CheckInstr(Jmp)('EDX')
+    CheckInstr(Jmp)('EDI')
+    CheckInstr(Jmp)(mem('[EAX]'))
+    CheckInstr(Jmp)(mem('[EAX + 2]'))
+    CheckInstr(Jmp)(mem('[0x12345678]'))
 
     assert x86.Test(mem('[ECX + 0x100]'), 'ECX').get_code() == x86.Test('ECX', mem('[ECX + 0x100]')).get_code()
     assert Xchg('EAX', 'ECX').get_code() == Xchg('ECX', 'EAX').get_code()
@@ -245,6 +251,10 @@ def test_simple_x64_raw_instruction():
     # Test the fake instruction "raw"
     # By emetting a multi-char nop manually
     CheckInstr(Raw, expected_result="nop word ptr [eax + eax]")("66 0F 1F 84 00 00 00 00 00")
+
+def test_simple_x86_assemble_raw_one_byte():
+    # Test the fake instruction "raw" inside an assemble that may translate str to int
+    assert x86.assemble("ret; raw 90; ret") ==  b"\xc3\x90\xc3"
 
 def test_x86_multiple_instr_add_instr_and_str():
     res = x86.MultipleInstr()

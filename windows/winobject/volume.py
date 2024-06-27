@@ -31,7 +31,7 @@ class LogicalDrive(AutoHandle):
 
         :type: :class:`long` or :class:`int` (or subclass)
         """
-        t = winproxy.GetDriveTypeA(self.name)
+        t = winproxy.GetDriveTypeW(self.name)
         return self.DRIVE_TYPE.get(t,t)
 
     @property
@@ -39,10 +39,16 @@ class LogicalDrive(AutoHandle):
         """The target path of the device
 
         :type: :class:`str`"""
-        res = query_dos_device(self.name.strip("\\"))
-        if len(res) != 1:
-            raise ValueError("[Unexpected result] query_dos_device(logicaldrive) returned multiple path")
-        return res[0]
+        # QueryDosDevice can returns multiple path if DefineDosDevice(AW) was used before
+        # Looks like its per-process
+        # But in ths cas the first entry is the effective-one and the others are the previous entries
+        # https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-querydosdevicea
+        # The first null-terminated string stored into the buffer is the current mapping for the device. The other null-terminated strings represent undeleted prior mappings for the device.
+        return query_dos_device(self.name.strip("\\"))[0]
+
+    @property
+    def query_dos_device(self):
+        return query_dos_device(self.name.strip("\\"))
 
     def query_info(self, info):
         return windows.utils.query_volume_information(self.handle, info)
@@ -57,7 +63,7 @@ class LogicalDrive(AutoHandle):
 
     def _get_handle(self):
         nt_name = windows.utils.dospath_to_ntpath(self.name)
-        handle = windows.winproxy.CreateFileA(nt_name, gdef.GENERIC_READ,
+        handle = windows.winproxy.CreateFileW(nt_name, gdef.GENERIC_READ,
                                                 gdef.FILE_SHARE_READ, None, gdef.OPEN_EXISTING, gdef.FILE_FLAG_BACKUP_SEMANTICS , None)
         return handle
 
@@ -69,20 +75,20 @@ def enum_logical_drive():
 
 def get_logical_drive_names():
     size = 0x100
-    buffer = ctypes.c_buffer(size)
-    rsize = winproxy.GetLogicalDriveStringsA(0x1000, buffer)
-    return buffer[:rsize].rstrip(b"\x00").split(b"\x00")
+    buffer = ctypes.create_unicode_buffer(size)
+    rsize = winproxy.GetLogicalDriveStringsW(size, buffer)
+    return buffer[:rsize].rstrip(u"\x00").split(u"\x00")
 
 def get_info(drivename):
     size = 0x1000
-    volume_name = ctypes.c_buffer(size)
-    fs_name = ctypes.c_buffer(size)
+    volume_name = ctypes.create_unicode_buffer(size)
+    fs_name = ctypes.create_unicode_buffer(size)
     flags = DWORD()
-    winproxy.GetVolumeInformationA(drivename, volume_name, size, None, None, ctypes.byref(flags), fs_name, size)
+    winproxy.GetVolumeInformationW(drivename, volume_name, size, None, None, ctypes.byref(flags), fs_name, size)
     return volume_name[:10], fs_name[:10]
 
 def query_dos_device(name):
     size = 0x1000
-    buffer = ctypes.c_buffer(size)
-    rsize = winproxy.QueryDosDeviceA(name, buffer, size)
-    return buffer[:rsize].rstrip(b"\x00").split(b"\x00")
+    buffer = ctypes.create_unicode_buffer(size)
+    rsize = winproxy.QueryDosDeviceW(name, buffer, size)
+    return buffer[:rsize].rstrip(u"\x00").split(u"\x00")

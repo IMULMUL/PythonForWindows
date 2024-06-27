@@ -698,7 +698,6 @@ class JmpImm8(JmpImm):
 class JmpImm32(JmpImm):
     accept_as_Ximmediat = staticmethod(accept_as_32immediat)
 
-
 # Instructions
 
 class Call(JmpType):
@@ -709,6 +708,7 @@ class Call(JmpType):
 class Jmp(JmpType):
     encoding = [(RawBits.from_int(8, 0xeb), JmpImm8(2)),
                 (RawBits.from_int(8, 0xe9), JmpImm32(5)),
+                (RawBits.from_int(8, 0xff), Slash(4)),
                 (RawBits.from_int(8, 0xea), SegmentSelectorAbsoluteAddr())]
 
 
@@ -1127,6 +1127,13 @@ def assemble_instructions_generator(str):
             instr_object = globals()[mnemo.capitalize()]
         except:
             raise ValueError("Unknow mnemonic <{0}>".format(mnemo))
+
+        if issubclass(instr_object, Raw):
+            # Raw should received the raw buffer as it expect encoded hex
+            # The transformation may transform 'raw 9090' (nopnop) as 0n9090
+            # If other fake-instr need this : make a class attribute
+            yield instr_object(*args_raw)
+            continue
 
         args = []
         if args_raw:

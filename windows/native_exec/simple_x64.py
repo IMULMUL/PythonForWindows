@@ -136,6 +136,7 @@ mem_access = collections.namedtuple('mem_access', ['base', 'index', 'scale', 'di
 reg_order = ['RAX', 'RCX', 'RDX', 'RBX', 'RSP', 'RBP', 'RSI', 'RDI']
 new_reg_order = ['R8', 'R9', 'R10', 'R11', 'R12', 'R13', 'R14', 'R15']
 x64_regs = reg_order + new_reg_order
+# Rip is now addressable but is a special case
 
 registers_32_bits = {'R15D': 'R15', 'R14D': 'R14', 'ESP': 'RSP', 'R9D': 'R9',
 'EDI': 'RDI', 'R11D': 'R11', 'R8D': 'R8', 'R10D': 'R10', 'EAX': 'RAX',
@@ -152,7 +153,7 @@ class X64(object):
     @staticmethod
     def is_reg(name):
         try:
-            return (name.upper() in reg_order) or X64.is_new_reg(name) or X64.is_32b_reg(name)
+            return X64.is_64b_reg(name) or X64.is_32b_reg(name)
         except AttributeError:  # Not a string
             return False
 
@@ -164,11 +165,22 @@ class X64(object):
             return False
 
     @staticmethod
+    def is_64b_reg(name):
+        try:
+            return (name.upper() in x64_regs)
+        except AttributeError:  # Not a string
+            return False
+
+    @staticmethod
     def is_32b_reg(name):
         try:
             return name.upper() in registers_32_bits
         except AttributeError:  # Not a string
             return False
+
+    @staticmethod
+    def is_rip(name):
+        return name is not None and name.upper() == "RIP"
 
     @staticmethod
     def is_mem_acces(data):
@@ -201,6 +213,9 @@ def create_displacement(base=None, index=None, scale=None, disp=0, prefix=None):
         raise ValueError("Cannot create displacement with scale and no index")
     if scale and index.upper() == "RSP":
         raise ValueError("Cannot create displacement with index == RSP")
+    if base and X64.is_rip(base):
+        if index is not None or scale is not None:
+            raise ValueError("Bad use of RIP in mem expression <{0}> : only [RIP+DISP32] is possible".format(data))
     return mem_access(base, index, scale, disp, prefix)
 
 
@@ -251,10 +266,14 @@ def mem(data):
             parsed_items['index'] = index
         else:
             # displacement / base / index alone
-            if X64.is_reg(item):
+            if X64.is_reg(item) or X64.is_rip(item):
                 if 'base' not in parsed_items:
                     parsed_items['base'] = item
                     continue
+                # RIP is only usable on the format [RIP+DISP32]
+                # So no index when base is RIP & no index as RIP
+                if X64.is_rip(item) or X64.is_rip(parsed_items['base']):
+                    raise ValueError("Bad use of RIP in mem expression <{0}> : only [RIP+DISP32] is possible".format(data))
                 # Already have base + index -> cannot avec another register in expression
                 if 'index' in parsed_items:
                     raise ValueError("Multiple index / index*scale in mem expression <{0}>".format(data))
@@ -644,6 +663,38 @@ class ModRM_REG__REG(SubModRM):
         self.setup_rm_as_register(arg1)
         self.direction = 0
 
+class ModRM_REG64__REG64(SubModRM):
+    """handle Reg64 Only, used by slash(x) that do not allow 32bits/rex (push / call / jmp)"""
+    @classmethod
+    def match(cls, arg1, arg2):
+        return X64.is_64b_reg(arg1) and X64.is_64b_reg(arg2)
+
+    def setup_reg_as_register(self, name):
+        name = name.upper()
+        # register IS a 64b register
+        self.setup_as_64bit_operation()
+        self.reg = X64RegisterSelector.get_reg_bits(name)
+        if X64.is_new_reg(name):
+            self.is_rex_needed = True
+            self.rex[5] = 1
+
+    def setup_rm_as_register(self, name):
+        name = name.upper()
+        # register IS a 64b register
+        self.setup_as_64bit_operation()
+
+        self.rm = X64RegisterSelector.get_reg_bits(name)
+        if X64.is_new_reg(name):
+            self.is_rex_needed = True
+            self.rex[7] = 1
+
+    def __init__(self, arg1, arg2, reversed, instr_state):
+        super(ModRM_REG64__REG64, self).__init__()
+
+        self.mod = BitArray(2, "11")
+        self.setup_reg_as_register(arg2)
+        self.setup_rm_as_register(arg1)
+        self.direction = 0
 
 class ModRM_REG64__MEM(SubModRM):
     @classmethod
@@ -656,18 +707,18 @@ class ModRM_REG64__MEM(SubModRM):
             instr_state.prefixes.append(x64_segment_selectors[arg2.prefix])
         # # ARG1 : REG
         # # ARG2 : [MEM]
-        # # this encode [rip + disp]
-        # # TODO :)
-        # if X64.mem_access_has_only(arg2, ["disp"]):
-        #     self.mod = BitArray(2, "00")
-        #     self.setup_reg_as_register(arg1)
-        #     self.rm = BitArray(3, "101")
-        #     try:
-        #         self.after = BitArray.from_string(accept_as_32immediat(arg2.disp))
-        #     except ImmediatOverflow:
-        #         raise ImmediatOverflow("Interger32 overflow for displacement {0}".format(hex(arg2.disp)))
-        #     self.direction = not reversed
-        #     return
+
+        # Special case [RIP+DISP32]
+        if X64.is_rip(arg2.base):
+            self.mod = BitArray(2, "00")
+            self.setup_reg_as_register(arg1)
+            self.rm = BitArray(3, "101")
+            try:
+                self.after = BitArray.from_string(accept_as_32immediat(arg2.disp))
+            except ImmediatOverflow:
+                raise ImmediatOverflow("Interger32 overflow for displacement {0}".format(hex(arg2.disp)))
+            self.direction = not reversed
+            return
 
         # Those registers cannot be addressed without SIB
         FIRE_UP_SIB = not arg2.base or arg2.base.upper() in ["RSP", "RBP"] or arg2.index
@@ -760,10 +811,13 @@ class REG64__MEM_Slash(ModRM_REG64__MEM):
 class Slash(object):
     "No idea for the name: represent the modRM for single args + encoding in reg (/7 in cmp in man intel)"
 
-    def __init__(self, reg_num):
+    # only64b seems to be the contrary ok Instr.default_32_bits use this as a base ?
+    # Make a Slash64 () ?
+    def __init__(self, reg_num, only64b=False):
         "reg = 7 for /7"
         self.reg = reg_order[reg_num]
         self.reg_num = reg_num
+        self.only64b = only64b
 
     def accept_arg(self, args, instr_state):
         if len(args) < 1:
@@ -773,8 +827,13 @@ class Slash(object):
         injected_reg = self.reg
         if X64.is_32b_reg(args[0]):
             injected_reg = registers_64_to_32_bits[injected_reg]
+        if self.only64b:
+            modrm_reg_reg_type = ModRM_REG64__REG64
+        else:
+            modrm_reg_reg_type = ModRM_REG__REG
+
         try:
-            arg_consum, value, rex = ModRM([ModRM_REG__REG, REG64__MEM_Slash], has_direction_bit=False).accept_arg(args[:1] + [injected_reg] + args[1:], instr_state)
+            arg_consum, value, rex = ModRM([modrm_reg_reg_type, REG64__MEM_Slash], has_direction_bit=False).accept_arg(args[:1] + [injected_reg] + args[1:], instr_state)
         except ValueError as e:
             # Size mismatch
             return None, None, None
@@ -856,11 +915,14 @@ class JmpType(Instruction):
 class Push(Instruction):
     encoding = [(RawBits.from_int(5, 0x50 >> 3), X64RegisterSelector()),
                 (RawBits.from_int(8, 0x68), AnyImm32()),
-                (RawBits.from_int(8, 0xff), Slash(6))]
+                (RawBits.from_int(8, 0xff), Slash(6, only64b=True))]
 
 
 class Pop(Instruction):
-    encoding = [(RawBits.from_int(5, 0x58 >> 3), X64RegisterSelector())]
+    encoding = [(RawBits.from_int(5, 0x58 >> 3), X64RegisterSelector()),
+                (RawBits.from_int(8, 0x8f), Slash(0, only64b=True))
+
+    ]
 
 
 
@@ -964,12 +1026,13 @@ class JmpImm32(JmpImm):
 
 class Call(JmpType):
     encoding = [(RawBits.from_int(8, 0xe8), JmpImm32(5)),
-                (RawBits.from_int(8, 0xff), Slash(2))]
+                (RawBits.from_int(8, 0xff), Slash(2, only64b=True))]
 
 
 class Jmp(JmpType):
     encoding = [(RawBits.from_int(8, 0xeb), JmpImm8(2)),
                 (RawBits.from_int(8, 0xe9), JmpImm32(5)),
+                (RawBits.from_int(8, 0xff), Slash(4, only64b=True)),
                 (RawBits.from_int(13, 0xffe0 >> 3), X64RegisterSelector())]
 
 
@@ -1098,6 +1161,8 @@ class Retf(Instruction):
     default_32_bits = True
     encoding = [(RawBits.from_int(8, 0xcb),)]
 
+class Retfq(Instruction): # Give an explicit name to retf-64bits as it cannot be guessed from the mnemonic alone
+    encoding = [(RawBits.from_int(8, 0x48), RawBits.from_int(8, 0xcb))]
 
 class Retf32(Instruction):
     encoding = [(RawBits.from_int(8, 0xcb),)]
@@ -1115,11 +1180,15 @@ def JmpAt(addr):
 
 class Raw(Instruction):
     """Output raw data"""
+
     def __init__(self, *initial_args):
         if len(initial_args) != 1:
             raise ValueError("raw 'opcode' only accept one argument")
-        # Accept space
-        self.data = binascii.unhexlify(initial_args[0].replace(" ", ""))
+        if isinstance(initial_args[0], int):
+            self.data = struct.pack("B", initial_args[0])
+        else:
+            # Accept space
+            self.data = binascii.unhexlify(initial_args[0].replace(" ", ""))
 
     def get_code(self):
         return self.data
@@ -1300,6 +1369,12 @@ def assemble_instructions_generator(str):
         except:
             raise ValueError("Unknow mnemonic <{0}>".format(mnemo))
 
+        if issubclass(instr_object, Raw):
+            # Raw should received the raw buffer as it expect encoded hex
+            # The transformation may transform 'raw 9090' (nopnop) as 0n9090
+            # If other fake-instr need this : make a class attribute
+            yield instr_object(*args_raw)
+            continue
         args = []
         if args_raw:
             for arg in args_raw[0].split(","):

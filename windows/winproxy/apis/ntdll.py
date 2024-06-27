@@ -80,6 +80,22 @@ def NtQueryEaFile(FileHandle, IoStatusBlock, Buffer, Length, ReturnSingleEntry, 
 def NtSetEaFile(FileHandle, IoStatusBlock, Buffer, Length):
     return NtSetEaFile.ctypes_function(FileHandle, IoStatusBlock, Buffer, Length)
 
+@NtdllProxy()
+def NtReadFile(FileHandle, Event=None, ApcRoutine=None, ApcContext=None, IoStatusBlock=None, Buffer=NeededParameter, Length=None, ByteOffset=None, Key=None):
+    if Length is None:
+        Length = ctypes.sizeof(Buffer)
+    if IoStatusBlock is None:
+        IoStatusBlock = gdef.IO_STATUS_BLOCK()
+    return NtReadFile.ctypes_function(FileHandle, Event, ApcRoutine, ApcContext, IoStatusBlock, Buffer, Length, ByteOffset, Key)
+
+@NtdllProxy()
+def NtWriteFile(FileHandle, Event=None, ApcRoutine=None, ApcContext=None, IoStatusBlock=None, Buffer=NeededParameter, Length=None, ByteOffset=None, Key=None):
+    if Length is None:
+        Length = ctypes.sizeof(Buffer)
+    if IoStatusBlock is None:
+        IoStatusBlock = gdef.IO_STATUS_BLOCK()
+    return NtWriteFile.ctypes_function(FileHandle, Event, ApcRoutine, ApcContext, IoStatusBlock, Buffer, Length, ByteOffset, Key)
+
 
 # Process
 
@@ -188,6 +204,13 @@ def NtQuerySystemInformation(SystemInformationClass, SystemInformation=None, Sys
     if SystemInformation is not None and SystemInformationLength == 0:
         SystemInformationLength = ctypes.sizeof(SystemInformation)
     return NtQuerySystemInformation.ctypes_function(SystemInformationClass, SystemInformation, SystemInformationLength, ReturnLength)
+
+
+@NtdllProxy(error_check=ntquerysysteminformation_error_check)
+def NtQuerySystemInformationEx(SystemInformationClass, InputBuffer, InputBufferLength, SystemInformation, SystemInformationLength, ReturnLength):
+    if SystemInformation is not None and SystemInformationLength == 0:
+        SystemInformationLength = ctypes.sizeof(SystemInformation)
+    return NtQuerySystemInformationEx.ctypes_function(SystemInformationClass, InputBuffer, InputBufferLength, SystemInformation, SystemInformationLength, ReturnLength)
 
 # path
 

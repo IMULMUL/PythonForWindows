@@ -4,9 +4,12 @@ import os.path
 import re
 import glob
 import textwrap
-import StringIO
-import pprint
+try:
+    from StringIO import StringIO
+except ImportError:
+    from io import StringIO # Py3
 
+import pprint
 import shutil
 
 import dummy_wintypes
@@ -44,6 +47,9 @@ class ParsedFile(object):
         self.compute_imports_exports(self.data)
 
     def add_exports(self, *names):
+        new_names = set(names)
+        if self.exports & new_names:
+            raise ValueError("Error: file <{0}> have multiple definition for <{1}>".format(self.filename, self.exports & new_names))
         self.exports.update(names)
 
     def add_imports(self, *names):
@@ -66,23 +72,24 @@ class StructureParsedFile(ParsedFile):
         structs, enums = data
         for enum in enums:
             self.add_exports(enum.name)
-            self.add_exports(*enum.typedef)
+            self.add_exports(*[n for n in enum.typedef if n != enum.name])
         for struct in structs:
             self.compute_imports_exports_for_struct(struct)
 
 
-    def compute_imports_exports_for_struct(self, struct):
+    def compute_imports_exports_for_struct(self, struct, is_sub_struct=False):
         self.asser_struct_not_already_in_import(struct)
-        if any(x in self.imports for x in [struct.name] + struct.typedef.keys()):
+        if any(x in self.imports for x in [struct.name] + list(struct.typedef)):
             print("Export <{0}> defined after first use".format(struct.name))
             raise ValueError("LOL")
-        if struct.name is not None: # Anonymous structs
+        if struct.name is not None and not is_sub_struct: # Anonymous structs
             self.add_exports(struct.name)
-        self.add_exports(*struct.typedef)
+        if not is_sub_struct: # Sub struct will not be directly exposed : so not an export
+            self.add_exports(*[n for n in struct.typedef if n != struct.name])
         for field_type, field_name, nb_rep in struct.fields:
             if field_name is None:
                 # Anon sub-struct/union
-                self.compute_imports_exports_for_struct(field_type)
+                self.compute_imports_exports_for_struct(field_type, is_sub_struct=True)
                 continue
             if field_type.name not in self.exports:
                 self.add_imports(field_type.name)
@@ -94,7 +101,7 @@ class StructureParsedFile(ParsedFile):
                 self.add_imports(*nb_rep.get_names())
 
     def asser_struct_not_already_in_import(self, struct):
-        for sname in [struct.name] + struct.typedef.keys():
+        for sname in [struct.name] + list(struct.typedef):
             try:
                 already_used = self.imports_by_struct[sname]
                 raise ValueError("Structure <{0}> is defined after being used in <{1}>".format(sname, already_used))
@@ -114,6 +121,8 @@ class DefinitionParsedFile(ParsedFile):
 
     def compute_imports_exports(self, data):
         for windef in data:
+            if windef.name in self.exports:
+                raise ValueError("File <{filename}> define <{windef}> multiple times".format(filename=self.filename, windef=windef.name))
             self.add_exports(windef.name) # No dependancy check on rvalue for now
             if "|" in windef.code: # Multi flags ? Allow cross-file dependancies
                 # Quick parsing: add all names in the imports
@@ -277,7 +286,7 @@ class CtypesGenerator(object):
     def __init__(self, parsed_files, template):
         self.files = parsed_files # Already in generation order
         self.template = template # MAKE BETTER
-        self.result = StringIO.StringIO()
+        self.result = StringIO()
         self.imported_name = set([])
 
     def add_import_name(self, name):
@@ -327,7 +336,7 @@ class CtypesGenerator(object):
 class NoTemplatedGenerator(CtypesGenerator):
    def __init__(self, parsed_files):
        self.files = parsed_files # Already in generation order
-       self.result = StringIO.StringIO()
+       self.result = StringIO()
        self.imported_name = set([])
 
    def copy_template(self):
@@ -564,12 +573,18 @@ class StructureDocGenerator(NoTemplatedGenerator):
             self.emitline(struct.name)
             self.emitline(self.STRUCT_NAME_SEPARATOR * len(struct.name))
             # Emit typedef
-            for name, type in  struct.typedef.items():
+            for name, type in sorted(struct.typedef.items()):
+                # May have no real type def -> ignore
+                if name == type.name:
+                    continue
                 self.emitline(".. class:: {0}".format(name))
                 self.emitline("")
                 if hasattr(type, "type"):
                     self.emitline("    Pointer to :class:`{0}`".format(type.type.name))
                 else:
+                    if "SYMSRV_INDEX_INFOW" in type.name:
+                        import pdb;pdb.set_trace()
+
                     self.emitline("    Alias for :class:`{0}`".format(type.name))
                 self.emitline("")
             # Emit struct Definition
@@ -602,7 +617,10 @@ class StructureDocGenerator(NoTemplatedGenerator):
             self.emitline(enum.name)
             self.emitline(self.STRUCT_NAME_SEPARATOR * len(enum.name))
              # Emit typedef
-            for name, type in  enum.typedef.items():
+            for name, type in  sorted(enum.typedef.items()):
+                # May have no real type def -> ignore
+                if name == type.name:
+                    continue
                 self.emitline(".. class:: {0}".format(name))
                 self.emitline("")
                 if hasattr(type, "type"):
@@ -617,6 +635,53 @@ class StructureDocGenerator(NoTemplatedGenerator):
                 self.emitline("    .. attribute:: {0}({1})".format(enum_name, enum_value))
                 self.emitline("")
 
+class WinFuncDocGenerator(NoTemplatedGenerator):
+    def copy_template(self):
+        self.emitline(".. module:: windows.generated_def.winfuncs")
+        self.emitline("")
+        self.emitline("Functions")
+        self.emitline("----------")
+
+
+    def generate(self):
+        self.copy_template()
+        for file in self.files:
+            for function in file.data:
+                self.generate_function_doc(function)
+
+    def generate_function_doc(self, function):
+        param_list = ", ".join(name for t, name in function.params)
+        self.emitline(".. function:: {0}({1})".format(function.name, param_list))
+        self.emitline("")
+
+
+
+class ComDocGenerator(NoTemplatedGenerator):
+    def copy_template(self):
+        self.emitline(".. module:: windows.generated_def.interfaces")
+        self.emitline("")
+        self.emitline("Interfaces")
+        self.emitline("----------")
+
+
+    def generate(self):
+        self.copy_template()
+        for file in self.files:
+            interface = file.data
+            self.generate_interface_doc(interface)
+
+    def generate_interface_doc(self, interface):
+        self.emitline(".. class:: {0}".format(interface.name))
+        self.emitline("")
+        for method in interface.methods:
+            self.emitline("    .. method:: {0}".format(method.name))
+        self.emitline("")
+        self.emitline("")
+
+
+
+
+
 META_WALKER = """
 def generate_walker(namelist, target_module):
     def my_walker():
@@ -627,7 +692,7 @@ def generate_walker(namelist, target_module):
 
 class MetaFileGenerator(NoTemplatedGenerator):
     def __init__(self):
-       self.result = StringIO.StringIO()
+       self.result = StringIO()
        self.modules = []
 
     def add_exportlist(self, name, modname, exports):
@@ -636,10 +701,17 @@ class MetaFileGenerator(NoTemplatedGenerator):
     def add_export_module(self, module):
         self.add_exportlist(module.name, module.name, module.modules_exports())
 
-    def generate(self):
+    def pformat_exports_set(self, exports):
+        """A pretty print-function that have the same behavior on py2 & py3 (pprint.pformat is not)"""
+        assert isinstance(exports, set)
+        # import pdb;pdb.set_trace()
+        export_list = [repr(e) for e in sorted(exports)]
+        return "{{{0}}}\n".format(",\n".join(export_list)) # -> {export_list}
 
+    def generate(self):
         for name, modname, exports in self.modules:
-            self.emitline("{0} = {1}".format(name, pprint.pformat(exports)))
+            # import pdb;pdb.set_trace()
+            self.emitline("{0} = {1}".format(name, self.pformat_exports_set(exports)))
 
         self.emitline(META_WALKER)
 
@@ -661,9 +733,11 @@ class ModuleGenerator(object):
     def add_module_dependancy(self, module):
         self.dependances_modules.add(module)
 
-
     def get_template_filename(self):
         return pjoin(self.src, "template.py")
+
+    def get_template_exports(self):
+        return []
 
     def parse_source_directory(self, recurse=False):
         self.nodes += ParsedDirectory(self.filetype, self.src, recurse=recurse).nodes
@@ -702,7 +776,11 @@ class ModuleGenerator(object):
     def generate(self):
         self.parse_source_directory()
         # Flatten the graph
-        flatten_nodes = self.resolve_dependancies()
+        template_exports = self.get_template_exports()
+        if template_exports:
+            template_exports = [FakeExporter(template_exports)]
+        flatten_nodes = self.resolve_dependancies(depnodes=template_exports)
+        assert flatten_nodes
         self.generate_from_nodelist(flatten_nodes)
         self.nodes = flatten_nodes
 
@@ -713,6 +791,7 @@ class ModuleGenerator(object):
             depnodes += moddep.nodes
         flatten_nodes = self.resolve_dependancies(depnodes=depnodes)
         self.generate_from_nodelist(flatten_nodes)
+        self.nodes = flatten_nodes
 
     def after_ctypes_generator_init(self, ctypesgen):
         pass
@@ -756,6 +835,11 @@ shutil.copy(from_here(r"definitions\flag.py"), DEST_DIR)
 print("== Generating defines ==")
 # Generate defines
 definemodulegenerator = ModuleGenerator("windef", DefinitionParsedFile, DefineCtypesGenerator, DefineDocGenerator, from_here(r"definitions\defines"))
+# The windef.py template explicitly export CTL_CODE macro as a python function to simplify parsing
+# Add here the fact that this symbol is exported somewhere to prevent a
+#  ValueError: Missing dependancy <CTL_CODE> of <DefinitionParsedFile "XXX">
+# Give a nive way to the template to give its list of exports ?
+definemodulegenerator.get_template_exports = lambda : ["CTL_CODE"]
 definemodulegenerator.generate()
 definemodulegenerator.generate_doc(from_here(r"..\docs\source\windef_generated.rst"))
 
@@ -790,23 +874,25 @@ structure_module_generator.generate_doc(from_here(r"..\docs\source\winstructs_ge
 
 print("== Generating COM interfaces ==")
 # Generate COM interfaces
-com_module_generator = ModuleGenerator("interfaces", COMParsedFile, COMCtypesGenerator, None, from_here(r"definitions\com"))
+com_module_generator = ModuleGenerator("interfaces", COMParsedFile, COMCtypesGenerator, ComDocGenerator, from_here(r"definitions\com"))
 # Load the interface_to_iid file needed by the 'COMCtypesGenerator'
 com_module_generator.after_ctypes_generator_init = lambda cgen: cgen.parse_iid_file(from_here("definitions\\interface_to_iid.txt"))
 com_module_generator.parse_source_directory(recurse=True)
 com_module_generator.add_module_dependancy(structure_module_generator)
 com_module_generator.resolve_dependancies = com_module_generator.check_dependancies_without_flattening # No real flattening as we have circular dep in Interfaces VTBL
 com_module_generator.resolve_dep_and_generate([BasicTypeNodes()])
+com_module_generator.generate_doc(from_here(r"..\docs\source\interfaces_generated.rst"))
 
 print("== Generating functions ==")
 # Generate function
-functions_module_generator = ModuleGenerator("winfuncs", FunctionParsedFile, FunctionCtypesGenerator, None, from_here(r"definitions\functions"))
+functions_module_generator = ModuleGenerator("winfuncs", FunctionParsedFile, FunctionCtypesGenerator, WinFuncDocGenerator, from_here(r"definitions\functions"))
 # no template file
 functions_module_generator.get_template_filename = lambda : None
 functions_module_generator.parse_source_directory()
 functions_module_generator.add_module_dependancy(structure_module_generator)
 functions_module_generator.add_module_dependancy(com_module_generator)
 functions_module_generator.resolve_dep_and_generate([BasicTypeNodes()])
+functions_module_generator.generate_doc(from_here(r"..\docs\source\winfuncs_generated.rst"))
 
 
 print("== Generating META file ==")
